@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: landing-nginx
+  namespace: llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: landing-nginx
+  template:
+    metadata:
+      labels:
+        app: landing-nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80           # ✅ Required
+        volumeMounts:
+        - name: html
+          mountPath: /usr/share/nginx/html
+        # ========= Probes =========
+        # nginx + static ConfigMap, starts very fast (<1s)
+        # startupProbe mainly guards against occasional slow ConfigMap mounts
+        startupProbe:
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 3
+          timeoutSeconds: 3
+          failureThreshold: 5          # ~15s startup budget
+
+        readinessProbe:                # Decide whether to accept traffic
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+
+        livenessProbe:                 # Restart if nginx hangs
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 30
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: html
+        configMap:
+          name: landing-page

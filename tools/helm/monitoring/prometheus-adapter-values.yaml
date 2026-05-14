@@ -1,0 +1,76 @@
+# prometheus-adapter Helm Values
+#
+# Purpose: "translate" metrics in Prometheus into K8s custom metrics API readable format,
+#          so HPA can scale based on business metrics like vllm:num_requests_waiting.
+#
+# Without this component, K8s HPA can only use resource metrics (CPU / memory) from metrics-server.
+
+# Prometheus data source
+# Note: service name is related to Helm release name:
+#   helm upgrade --install monitoring prometheus-community/kube-prometheus-stack
+#   → service is called monitoring-kube-prometheus-prometheus
+#
+# ⚠️ path must be set together with prometheus startup parameter --web.route-prefix=/prometheus.
+# Without path, adapter will GET /api/v1/series get 404, then HPA is always unknown,
+# showing vllm-worker replicas don't scale no matter the load. kube-prometheus-stack uses
+# /prometheus prefix by default (to work with ingress reverse proxy), so path must be set.
+prometheus:
+  url: http://monitoring-kube-prometheus-prometheus.monitoring.svc
+  port: 9090
+  path: /prometheus
+
+# Schedule prometheus-adapter Pod to system nodes
+nodeSelector:
+  system: "true"
+
+# Custom metric rules
+rules:
+  default: false   # Disable default set, only expose what we need
+
+  custom:
+    # =========================================================
+    # vLLM queue depth → for vllm-worker HPA
+    # =========================================================
+    # Expose vllm:num_requests_waiting as Pod-level metric:
+    #   GET /apis/custom.metrics.k8s.io/v1beta1/namespaces/llm/pods/*/vllm_num_requests_waiting
+    # When configuring HPA, reference metric name vllm_num_requests_waiting
+    - seriesQuery: 'vllm:num_requests_waiting{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace:
+            resource: "namespace"
+          pod:
+            resource: "pod"
+      name:
+        matches: "^vllm:(.*)$"
+        as: "vllm_${1}"
+      metricsQuery: 'avg_over_time(<<.Series>>{<<.LabelMatchers>>}[2m])'
+
+    # =========================================================
+    # vLLM number of running requests → also expose, convenient for dashboard / future extension
+    # =========================================================
+    - seriesQuery: 'vllm:num_requests_running{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace:
+            resource: "namespace"
+          pod:
+            resource: "pod"
+      name:
+        matches: "^vllm:(.*)$"
+        as: "vllm_${1}"
+      metricsQuery: 'avg_over_time(<<.Series>>{<<.LabelMatchers>>}[2m])'
+
+# Expose ServiceMonitor to Prometheus to scrape prometheus-adapter's own metrics
+# (meta-monitoring: monitor your monitoring components)
+serviceMonitor:
+  enabled: true
+
+# Resource requests (adapt to prometheus-adapter's own workload)
+resources:
+  requests:
+    cpu: "50m"
+    memory: "128Mi"
+  limits:
+    cpu: "200m"
+    memory: "256Mi"

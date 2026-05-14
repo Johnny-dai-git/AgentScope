@@ -1,0 +1,53 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: llm-platform-services
+  namespace: argocd
+  annotations:
+    # ArgoCD Image Updater configuration
+    # Enable Image Updater (required! Without this, Image Updater will ignore this Application)
+    argocd-image-updater.argoproj.io/enabled: "true"
+    # Centralized management of image update configuration for all services
+    # image-list format: single line, comma-separated (safer, avoids YAML/CRLF parsing issues)
+    # Note: llm-api is the unified service after merging gateway and the original router
+    # Currently only vLLM is supported; TensorRT/BERT have been removed
+    argocd-image-updater.argoproj.io/image-list: llm-api=ghcr.io/johnny-dai-git/llm-deployment/gateway,vllm-worker=ghcr.io/johnny-dai-git/llm-deployment/vllm-worker,web=ghcr.io/johnny-dai-git/llm-deployment/web
+    # llm-api (gateway+router merged) configuration
+    argocd-image-updater.argoproj.io/llm-api.update-strategy: name
+    argocd-image-updater.argoproj.io/llm-api.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    # vllm-worker configuration
+    argocd-image-updater.argoproj.io/vllm-worker.update-strategy: name
+    argocd-image-updater.argoproj.io/vllm-worker.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    # web configuration
+    argocd-image-updater.argoproj.io/web.update-strategy: name
+    argocd-image-updater.argoproj.io/web.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    # ArgoCD write-back configuration (recommended: patch Application directly, no need for Git token)
+    # ⚠️ Important: using argocd mode can avoid GitHub Push Protection issues
+    # Image Updater will directly patch ArgoCD Application, then ArgoCD auto-syncs Deployment
+    argocd-image-updater.argoproj.io/write-back-method: argocd
+  # Note: business Application is not recommended to use finalizer
+  # Reason: easy to hang during deletion, not conducive to quick rollback/environment rebuild
+  # Keep if "deleting Application deletes all business resources"; otherwise recommended to remove
+  # finalizers:
+  #   - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Johnny-dai-git/llm-deployment.git
+    # GCP_BRANCH targets a Lambda Labs bare A100 instance + MIG.
+    # (Branch name is historical — initially scoped to GKE.)
+    # The laptop deployment uses the `telemetry` branch instead.
+    targetRevision: GCP_BRANCH
+    path: tools/llm
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: llm
+  # HPA removed — ArgoCD now fully owns Deployment.spec.replicas.
+  # (Previously ignoreDifferences excluded /spec/replicas so HPA could mutate it
+  #  without selfHeal fighting back; no longer needed.)
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

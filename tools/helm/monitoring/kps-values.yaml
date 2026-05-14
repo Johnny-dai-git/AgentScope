@@ -1,0 +1,246 @@
+# kube-prometheus-stack Helm Values
+# Demo scenario: subpath + Ingress + variable IP
+#
+# ============================================================================
+# Eviction protection (two-pronged approach):
+#   1. priorityClassName: monitoring-critical (value=100000)
+#      → Under node pressure, kubelet prioritizes evicting workload pods, not monitoring
+#   2. requests == limits  (Guaranteed QoS)
+#      → During eviction, Guaranteed is the last tier (BestEffort < Burstable < Guaranteed)
+#
+# Combined, monitoring components are only affected when nodes truly die/lose connection,
+# not by ordinary workload spikes.
+# See: tools/helm/monitoring/priority-classes.yaml (must apply with kubectl first)
+# ============================================================================
+
+# =======================
+# Grafana
+# =======================
+grafana:
+  enabled: true
+
+  # ============ Init container fix (Lambda / hostPath PV) ============
+  # Modern Grafana chart (v8+) changed init-chown-data to non-root + dropped CAP_CHOWN,
+  # hits "Permission denied" on hostPath / local-path PV → CrashLoopBackOff.
+  # Disable it, let launch.sh directly chown 472:472 on host after PVC binds.
+  # See chown_grafana_pv function in script/lambda/launch.sh.
+  initChownData:
+    enabled: false
+
+  # ============ Eviction protection ============
+  priorityClassName: monitoring-critical
+
+  # Guaranteed QoS: requests = limits → kubelet evict priority lowest
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "500m"
+      memory: "1Gi"
+
+  affinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          preference:
+            matchExpressions:
+              - key: system
+                operator: In
+                values:
+                  - "true"
+
+  tolerations:
+    - key: "node-role.kubernetes.io/control-plane"
+      operator: "Exists"
+      effect: "NoSchedule"
+
+  adminUser: admin
+  adminPassword: admin
+
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    path: /grafana
+    pathType: Prefix
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+      nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+      nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+
+  # ⚠️ grafana.ini note: INI section names with dots (like [auth.anonymous],
+  # [auth.basic]) must use literal string keys, not nested YAML map.
+  # Nested map will be rendered by helm as JSON injected into parent section, Grafana won't understand.
+  grafana.ini:
+    server:
+      root_url: "%(protocol)s://%(domain)s/grafana/"
+      serve_from_sub_path: true
+
+    # [auth] main section
+    auth:
+      # Hide login form + logout menu → combined with anonymous Admin to achieve "zero-login" experience
+      # ⚠️ strictly forbidden for public networks! Only for local/internal demo
+      disable_login_form: true
+      disable_signout_menu: true
+
+    # [auth.anonymous] —— literal string key, not nested
+    # Anyone logs in without authentication with Admin privilege
+    "auth.anonymous":
+      enabled: true
+      org_name: "Main Org."
+      org_role: Admin
+
+    # [auth.basic] —— disable basic auth (we don't use it)
+    "auth.basic":
+      enabled: false
+
+  persistence:
+    enabled: true
+    type: pvc
+    accessModes:
+      - ReadWriteOnce
+    size: 10Gi
+
+# =======================
+# Prometheus
+# =======================
+prometheus:
+  enabled: true
+
+  prometheusSpec:
+    # ============ Eviction protection ============
+    priorityClassName: monitoring-critical
+
+    # Guaranteed QoS: requests = limits
+    resources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+
+    # Prometheus handles subpath itself
+    routePrefix: /prometheus
+    externalUrl: /prometheus
+
+    # Selectors fully open: standard practice for single team/small projects.
+    # ServiceMonitor / PodMonitor / PrometheusRule in any namespace
+    # will be selected by Prometheus, no requirement for specific labels.
+    # If multi-team isolation is needed later, tighten to matchLabels: {team: foo}, etc.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+
+    podMonitorSelectorNilUsesHelmValues: false
+    podMonitorNamespaceSelectorNilUsesHelmValues: false
+    podMonitorSelector: {}
+    podMonitorNamespaceSelector: {}
+
+    ruleSelectorNilUsesHelmValues: false
+    ruleNamespaceSelectorNilUsesHelmValues: false
+    ruleSelector: {}
+    ruleNamespaceSelector: {}
+
+    retention: 30d
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 50Gi
+
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    paths:
+      - /prometheus
+    pathType: Prefix
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+
+
+# =======================
+# Alertmanager
+# =======================
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    # ============ Eviction protection ============
+    priorityClassName: monitoring-critical
+
+    # Guaranteed QoS:requests = limits
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "100m"
+        memory: "256Mi"
+
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: system
+                  operator: In
+                  values:
+                    - "true"
+    tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+
+# =======================
+# Prometheus Operator (kps's own controller)
+# Medium priority, this is the hub managing Prometheus/Alertmanager CR
+# =======================
+prometheusOperator:
+  priorityClassName: monitoring-critical
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+
+# =======================
+# Node Exporter (DaemonSet, one per node, inherently system-node-critical concept)
+# Standard tier is sufficient, no need for critical
+# =======================
+nodeExporter:
+  enabled: true
+
+prometheus-node-exporter:
+  priorityClassName: monitoring-standard
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "50m"
+      memory: "64Mi"
+
+# =======================
+# Kube State Metrics
+# =======================
+kubeStateMetrics:
+  enabled: true
+
+kube-state-metrics:
+  priorityClassName: monitoring-standard
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "50m"
+      memory: "128Mi"

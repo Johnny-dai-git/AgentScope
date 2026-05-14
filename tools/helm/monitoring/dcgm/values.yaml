@@ -1,0 +1,19 @@
+# DCGM Exporter Helm Values
+runtimeClassName: nvidia
+
+serviceMonitor:
+  enabled: true
+  interval: 15s
+
+resources:
+  requests:
+    memory: 1Gi
+  limits:
+    memory: 1Gi
+
+# Node Selector
+# DCGM only cares "where is the GPU", regardless of whether the node has a system role.
+# Previously mistakenly added system: "true", in multi-node setups (GPU nodes without system label)
+# this would prevent DCGM Pod from scheduling, so remove it here.
+nodeSelector:
+  gpu-node: "true"

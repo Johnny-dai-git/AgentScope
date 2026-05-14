@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: llm-api
+  namespace: llm
+  labels:
+    app: llm-api
+spec:
+  # Service selector: match api-gateway-service (metadata.labels.app: llm-api)
+  selector:
+    matchLabels:
+      app: llm-api
+  # Search within same namespace
+  namespaceSelector:
+    matchNames:
+      - llm
+  endpoints:
+    - port: http              # Reference Service's named port
+      path: /metrics          # Metrics path exposed by gateway.py
+      interval: 15s           # Scrape interval
+      scrapeTimeout: 10s      # Single scrape timeout
+      honorLabels: false

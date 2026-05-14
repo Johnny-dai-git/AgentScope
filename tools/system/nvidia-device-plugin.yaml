@@ -1,0 +1,121 @@
+# =====================================================================
+# NVIDIA Device Plugin + MIG (Multi-Instance GPU)
+# ---------------------------------------------------------------------
+# Lambda Labs A100 deployment (GCP_BRANCH). Compared to the laptop branch:
+#
+#   laptop:    1× RTX 4050 (6 GB) split into 2 virtual GPUs via
+#              "time-slicing" (software-level scheduling, no isolation)
+#
+#   here:      1× A100 (40 GB) split into 7 hardware-isolated MIG
+#              instances of 1g.5gb (5 GB each, 1/7 of the SMs).
+#              MIG provides true memory + compute isolation between
+#              pods, eliminating the "noisy neighbor" problem
+#              time-slicing has, and lets HPA scale up to 7 replicas
+#              on a single physical GPU for high-availability serving.
+#
+# A100 40GB MIG profile choices:
+#   - 7× 1g.5gb        — 7 small instances (5 GB each, 1/7 SMs)  ← we use this
+#   - 4× 1g.5gb + 1× 2g.10gb (mixed)
+#   - 3× 2g.10gb       — 3 medium (10 GB each)
+#   - 2× 3g.20gb       — 2 large (20 GB each)
+#   - 1× 7g.40gb       — whole card
+#
+# On Lambda Labs the host comes with no MIG configured by default.
+# `script/lambda/all_install.sh` handles the full setup automatically:
+#   1. nvidia-smi -mig 1                      # enable MIG mode
+#   2. nvidia-smi mig -lgip                   # discover 1g.5gb profile id
+#   3. nvidia-smi mig -cgi <id>×7 -C          # create 7 GI + CI in one shot
+# Idempotent: skips if 7 instances already exist; cleans partials and rebuilds.
+# =====================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    version: v1
+    flags:
+      # `single` strategy:plugin treats every MIG instance as a regular
+      # `nvidia.com/gpu: 1` resource. Pods schedule against this
+      # uniform resource without needing to know MIG profile names.
+      # Use `mixed` strategy if you want to expose different sized
+      # MIG instances on the same node as separate resources
+      # (nvidia.com/mig-3g.20gb etc.).
+      migStrategy: single
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin-ds
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin-ds
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+
+        - name: nvidia-lib
+          hostPath:
+            path: /usr/lib/x86_64-linux-gnu
+            type: Directory
+
+        - name: nvidia-dev
+          hostPath:
+            path: /dev
+            type: Directory
+
+        - name: device-plugin-config
+          configMap:
+            name: nvidia-device-plugin-config
+
+      containers:
+        - name: nvidia-device-plugin-ctr
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.15.0
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - --config-file=/etc/nvidia-device-plugin/config.yaml
+
+          env:
+            - name: FAIL_ON_INIT_ERROR
+              value: "false"
+
+          securityContext:
+            privileged: true
+
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+
+            - name: nvidia-lib
+              mountPath: /usr/lib/x86_64-linux-gnu
+              readOnly: true
+
+            - name: nvidia-dev
+              mountPath: /dev
+
+            - name: device-plugin-config
+              mountPath: /etc/nvidia-device-plugin
+              readOnly: true
+
+      restartPolicy: Always

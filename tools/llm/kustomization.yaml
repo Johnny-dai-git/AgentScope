@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: llm
+
+resources:
+  # API services (gateway+router merged into a single llm-api)
+  - api/llm-api-deployment.yaml
+  - api/api-gateway-service.yaml
+  - api/api-servicemonitor.yaml
+
+  # Web frontend
+  - web/llm-web-deployment.yaml
+  - web/llm-web-service.yaml
+  - web/llm-web-nginx-configmap.yaml
+
+  # Workers (vLLM only; TensorRT scaffolding removed)
+  - workers/vllm/vllm-worker-deployment.yaml
+  - workers/vllm/vllm-worker-service.yaml
+  - workers/vllm/vllm-servicemonitor.yaml
+
+  # Ingress
+  - ingress/unified-ingress.yaml

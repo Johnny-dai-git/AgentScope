@@ -1,0 +1,25 @@
+# ArgoCD Helm Chart Values
+# For installing and configuring ArgoCD via Helm
+
+server:
+  # Disable HTTPS enforcement (use HTTP)
+  insecure: true
+
+  # Additional command line parameters (configure subpath access)
+  extraArgs:
+    - --rootpath=/argocd
+    - --basehref=/argocd
+
+# Ingress configuration
+ingress:
+  enabled: true
+  ingressClassName: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+  paths:
+    - /argocd

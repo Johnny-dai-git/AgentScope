@@ -1,0 +1,38 @@
+# =====================================================================
+# PriorityClasses for the monitoring stack
+# ---------------------------------------------------------------------
+# When node resources are tight (GPU pod scaling / vllm consuming memory, etc.),
+# kubelet decides which pod to evict first based on QoS + PriorityClass.
+#
+# By default, all pod's priorityClassName is empty, equivalent to priority=0,
+# sorted by QoS together with all user workloads for eviction. Grafana being evicted
+# without priority is an observed phenomenon.
+#
+# Two tiers defined here:
+#   monitoring-critical:    Grafana / Prometheus / Alertmanager - 100000
+#   monitoring-standard:    Other optional (DCGM / kube-state-metrics)  - 50000
+#
+# Value reference (system reserve range):
+#   system-cluster-critical = 2,000,000,000
+#   system-node-critical    = 2,000,001,000
+# Our two are far below system-level, but far above default 0, achieving
+# the goal of "evict workload first, monitoring last".
+# =====================================================================
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: monitoring-critical
+value: 100000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Critical monitoring stack: Grafana, Prometheus, Alertmanager. Protect from node-pressure eviction."
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: monitoring-standard
+value: 50000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Standard monitoring components: DCGM exporter, kube-state-metrics, etc."
