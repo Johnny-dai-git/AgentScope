@@ -1,0 +1,106 @@
+# vllm-qwen-small — Qwen2.5-0.5B on the time-sliced 1g.10gb pool
+#
+# Bound to one of 8 schedulable slots exposed by the device plugin on
+# the 2× 1g.10gb MIG instances. Coexists with vllm-tinyllama and
+# vllm-llama3 on the same physical MIG slices via software time-slicing.
+#
+# Model weights must exist at /mnt/models/qwen2.5-0.5b/.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen-small
+  namespace: llm
+  labels:
+    app: vllm-qwen-small
+    vllm.role: small-model
+  annotations:
+    argocd-image-updater.argoproj.io/image-list: vllm-qwen-small=ghcr.io/johnny-dai-git/llm-deployment/vllm-qwen-small
+    argocd-image-updater.argoproj.io/vllm-qwen-small.update-strategy: name
+    argocd-image-updater.argoproj.io/vllm-qwen-small.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    argocd-image-updater.argoproj.io/write-back-method: argocd
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: vllm-qwen-small
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen-small
+        vllm.role: small-model
+    spec:
+      runtimeClassName: nvidia
+      terminationGracePeriodSeconds: 60
+      nodeSelector:
+        gpu-node: "true"
+      containers:
+      - name: vllm
+        image: ghcr.io/johnny-dai-git/llm-deployment/vllm-qwen-small:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8002
+          protocol: TCP
+        resources:
+          # One time-slicing slot on a 1g.10gb MIG (10 GB VRAM, 14 SMs).
+          # Shares physical MIG with vllm-tinyllama / vllm-llama3.
+          requests:
+            nvidia.com/mig-1g.10gb: 1
+            cpu: "500m"
+            memory: "2Gi"
+          limits:
+            nvidia.com/mig-1g.10gb: 1
+            cpu: "2"
+            memory: "6Gi"
+        command:
+          - python3
+          - -m
+          - vllm.entrypoints.openai.api_server
+        args:
+          - --model=/model/qwen2.5-0.5b
+          - --served-model-name=qwen2.5-0.5b
+          - --host=0.0.0.0
+          - --port=8002
+          - --dtype=float16
+          # 0.7 of 10 GB = ~7 GB. With 3 small models time-slicing the
+          # same physical MIG we keep each one's VRAM footprint modest
+          # so they coexist comfortably.
+          - --gpu-memory-utilization=0.7
+          - --max-model-len=2048
+          - --max-num-seqs=8
+          - --max-num-batched-tokens=2048
+        volumeMounts:
+        - name: model-volume
+          mountPath: /model
+        startupProbe:
+          httpGet:
+            path: /v1/models
+            port: 8002
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /v1/models
+            port: 8002
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8002
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: model-volume
+        hostPath:
+          path: /mnt/models
+          type: DirectoryOrCreate

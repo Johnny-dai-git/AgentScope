@@ -1,31 +1,30 @@
 # =====================================================================
-# NVIDIA Device Plugin + MIG (Multi-Instance GPU)
+# NVIDIA Device Plugin + MIG (A100 80GB, mixed-profile layout)
 # ---------------------------------------------------------------------
-# Lambda Labs A100 deployment (GCP_BRANCH). Compared to the laptop branch:
+# This branch (GCP_BRANCH) targets Lambda Labs bare-metal A100 80GB.
+# `script/lambda/all_install.sh` carves the GPU into:
 #
-#   laptop:    1× RTX 4050 (6 GB) split into 2 virtual GPUs via
-#              "time-slicing" (software-level scheduling, no isolation)
+#   1× 3g.40gb   →  Qwen 14B  (exclusive, no sharing)
+#   1× 2g.20gb   →  Qwen 7B   (exclusive, no sharing)
+#   2× 1g.10gb   →  small models pool (time-sliced into 4 slots each)
 #
-#   here:      1× A100 (40 GB) split into 7 hardware-isolated MIG
-#              instances of 1g.5gb (5 GB each, 1/7 of the SMs).
-#              MIG provides true memory + compute isolation between
-#              pods, eliminating the "noisy neighbor" problem
-#              time-slicing has, and lets HPA scale up to 7 replicas
-#              on a single physical GPU for high-availability serving.
+# Total GPC budget : 3+2+1+1 = 7 ✓
+# Total VRAM       : 40+20+10+10 = 80 GB ✓
 #
-# A100 40GB MIG profile choices:
-#   - 7× 1g.5gb        — 7 small instances (5 GB each, 1/7 SMs)  ← we use this
-#   - 4× 1g.5gb + 1× 2g.10gb (mixed)
-#   - 3× 2g.10gb       — 3 medium (10 GB each)
-#   - 2× 3g.20gb       — 2 large (20 GB each)
-#   - 1× 7g.40gb       — whole card
+# `mixed` migStrategy exposes each profile as its own K8s resource:
+#   nvidia.com/mig-3g.40gb : 1 slot   (one MIG, one pod, exclusive)
+#   nvidia.com/mig-2g.20gb : 1 slot   (one MIG, one pod, exclusive)
+#   nvidia.com/mig-1g.10gb : 8 slots  (two MIGs × 4 time-slicing replicas)
 #
-# On Lambda Labs the host comes with no MIG configured by default.
-# `script/lambda/all_install.sh` handles the full setup automatically:
-#   1. nvidia-smi -mig 1                      # enable MIG mode
-#   2. nvidia-smi mig -lgip                   # discover 1g.5gb profile id
-#   3. nvidia-smi mig -cgi <id>×7 -C          # create 7 GI + CI in one shot
-# Idempotent: skips if 7 instances already exist; cleans partials and rebuilds.
+# Pods request a specific MIG profile, e.g.:
+#   resources.limits.nvidia.com/mig-3g.40gb: 1
+#
+# Why time-slicing only on 1g.10gb:
+#   Small models (Qwen 0.5B, TinyLlama 1.1B, Llama 3.2B, embeddings,
+#   rerankers) are individually tiny (1–3 GB VRAM, low latency) and
+#   benefit from being scheduled across the same physical MIG via
+#   software time-slicing. The big models care about KV-cache stability
+#   and tail latency, so they keep hardware-level isolation.
 # =====================================================================
 apiVersion: v1
 kind: ConfigMap
@@ -36,13 +35,25 @@ data:
   config.yaml: |
     version: v1
     flags:
-      # `single` strategy:plugin treats every MIG instance as a regular
-      # `nvidia.com/gpu: 1` resource. Pods schedule against this
-      # uniform resource without needing to know MIG profile names.
-      # Use `mixed` strategy if you want to expose different sized
-      # MIG instances on the same node as separate resources
-      # (nvidia.com/mig-3g.20gb etc.).
-      migStrategy: single
+      # `mixed` strategy = each MIG profile becomes its own K8s resource
+      # name (nvidia.com/mig-3g.40gb, etc). With `single` the plugin
+      # would collapse everything into `nvidia.com/gpu: 1` and we'd
+      # lose the ability to address profiles individually.
+      migStrategy: mixed
+    sharing:
+      timeSlicing:
+        # Don't rename — we keep the canonical nvidia.com/mig-*
+        # resource names so manifests are obvious.
+        renameByDefault: false
+        # Only the small-model pool gets sliced. Each 1g.10gb MIG is
+        # exposed as 4 schedulable slots → 2 MIGs × 4 = 8 total slots
+        # for small-model pods to coexist.
+        # Note: this is *software* sharing on top of hardware MIG, so
+        # pods sharing the same 1g.10gb compete for its 14 SMs and 10 GB.
+        # For the model sizes we put here this is fine.
+        resources:
+          - name: nvidia.com/mig-1g.10gb
+            replicas: 4
 ---
 apiVersion: apps/v1
 kind: DaemonSet

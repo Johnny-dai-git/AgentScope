@@ -7,20 +7,27 @@ metadata:
     # ArgoCD Image Updater configuration
     # Enable Image Updater (required! Without this, Image Updater will ignore this Application)
     argocd-image-updater.argoproj.io/enabled: "true"
-    # Centralized management of image update configuration for all services
-    # image-list format: single line, comma-separated (safer, avoids YAML/CRLF parsing issues)
-    # Note: llm-api is the unified service after merging gateway and the original router
-    # Currently only vLLM is supported; TensorRT/BERT have been removed
-    argocd-image-updater.argoproj.io/image-list: llm-api=ghcr.io/johnny-dai-git/llm-deployment/gateway,vllm-worker=ghcr.io/johnny-dai-git/llm-deployment/vllm-worker,web=ghcr.io/johnny-dai-git/llm-deployment/web
-    # llm-api (gateway+router merged) configuration
+    # Centralized image-list for the Application. Single comma-separated
+    # line (safest format — avoids YAML/CRLF parsing issues in Image Updater).
+    # Tracks 7 images: 1 gateway + 1 web + 5 model-specific workers.
+    argocd-image-updater.argoproj.io/image-list: llm-api=ghcr.io/johnny-dai-git/llm-deployment/gateway,web=ghcr.io/johnny-dai-git/llm-deployment/web,vllm-qwen14b=ghcr.io/johnny-dai-git/llm-deployment/vllm-qwen14b,vllm-qwen7b=ghcr.io/johnny-dai-git/llm-deployment/vllm-qwen7b,vllm-qwen-small=ghcr.io/johnny-dai-git/llm-deployment/vllm-qwen-small,vllm-tinyllama=ghcr.io/johnny-dai-git/llm-deployment/vllm-tinyllama,vllm-llama3=ghcr.io/johnny-dai-git/llm-deployment/vllm-llama3
+    # gateway (llm-api)
     argocd-image-updater.argoproj.io/llm-api.update-strategy: name
     argocd-image-updater.argoproj.io/llm-api.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
-    # vllm-worker configuration
-    argocd-image-updater.argoproj.io/vllm-worker.update-strategy: name
-    argocd-image-updater.argoproj.io/vllm-worker.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
-    # web configuration
+    # web
     argocd-image-updater.argoproj.io/web.update-strategy: name
     argocd-image-updater.argoproj.io/web.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    # workers — one alias per model
+    argocd-image-updater.argoproj.io/vllm-qwen14b.update-strategy: name
+    argocd-image-updater.argoproj.io/vllm-qwen14b.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    argocd-image-updater.argoproj.io/vllm-qwen7b.update-strategy: name
+    argocd-image-updater.argoproj.io/vllm-qwen7b.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    argocd-image-updater.argoproj.io/vllm-qwen-small.update-strategy: name
+    argocd-image-updater.argoproj.io/vllm-qwen-small.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    argocd-image-updater.argoproj.io/vllm-tinyllama.update-strategy: name
+    argocd-image-updater.argoproj.io/vllm-tinyllama.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    argocd-image-updater.argoproj.io/vllm-llama3.update-strategy: name
+    argocd-image-updater.argoproj.io/vllm-llama3.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
     # ArgoCD write-back configuration (recommended: patch Application directly, no need for Git token)
     # ⚠️ Important: using argocd mode can avoid GitHub Push Protection issues
     # Image Updater will directly patch ArgoCD Application, then ArgoCD auto-syncs Deployment

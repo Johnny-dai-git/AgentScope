@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen-small-service
+  namespace: llm
+  labels:
+    app: vllm-qwen-small
+    vllm.role: small-model
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-qwen-small
+  ports:
+    - name: http
+      port: 8002
+      targetPort: 8002
+      protocol: TCP
+---
+# Backwards-compat alias for the existing llm-api gateway, which
+# resolves vllm-worker-service.llm.svc.cluster.local. Points at the
+# Qwen 0.5B pod (the model the gateway was originally serving).
+# Remove this alias once the gateway becomes model-aware.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-worker-service
+  namespace: llm
+  labels:
+    app: vllm-qwen-small
+    vllm.role: legacy-alias
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-qwen-small
+  ports:
+    - name: http
+      port: 8002
+      targetPort: 8002
+      protocol: TCP

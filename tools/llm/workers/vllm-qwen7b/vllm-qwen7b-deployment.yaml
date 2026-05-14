@@ -1,0 +1,106 @@
+# vllm-qwen7b — medium-model worker (exclusive 2g.20gb MIG instance)
+#
+# This pod gets the entire 2g.20gb MIG slice to itself:
+#   - 20 GB VRAM           (Qwen2.5-7B fp16 weights ~14 GB + KV cache)
+#   - 2 GPCs (~28% of A100 SMs)
+#   - hardware isolation from the 14B and small-models pods
+#
+# Model weights must exist on the host at /mnt/models/qwen2.5-7b/
+# before this Deployment will become Ready.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen7b
+  namespace: llm
+  labels:
+    app: vllm-qwen7b
+    vllm.role: medium-model
+  annotations:
+    argocd-image-updater.argoproj.io/image-list: vllm-qwen7b=ghcr.io/johnny-dai-git/llm-deployment/vllm-qwen7b
+    argocd-image-updater.argoproj.io/vllm-qwen7b.update-strategy: name
+    argocd-image-updater.argoproj.io/vllm-qwen7b.allow-tags: regexp:^v-[0-9]{8}-[0-9]{6}$
+    argocd-image-updater.argoproj.io/write-back-method: argocd
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: vllm-qwen7b
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen7b
+        vllm.role: medium-model
+    spec:
+      runtimeClassName: nvidia
+      terminationGracePeriodSeconds: 120
+      nodeSelector:
+        gpu-node: "true"
+      containers:
+      - name: vllm
+        image: ghcr.io/johnny-dai-git/llm-deployment/vllm-qwen7b:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8002
+          protocol: TCP
+        resources:
+          # Exclusive 2g.20gb MIG slice (20 GB VRAM, 2 GPCs)
+          requests:
+            nvidia.com/mig-2g.20gb: 1
+            cpu: "2"
+            memory: "16Gi"
+          limits:
+            nvidia.com/mig-2g.20gb: 1
+            cpu: "4"
+            memory: "24Gi"
+        command:
+          - python3
+          - -m
+          - vllm.entrypoints.openai.api_server
+        args:
+          - --model=/model/qwen2.5-7b
+          - --served-model-name=qwen2.5-7b
+          - --host=0.0.0.0
+          - --port=8002
+          - --dtype=float16
+          # 0.85 of 20 GB = ~17 GB usable
+          # (~14 GB weights + ~3 GB KV cache)
+          - --gpu-memory-utilization=0.85
+          - --max-model-len=4096
+          - --max-num-seqs=12
+          - --max-num-batched-tokens=4096
+        volumeMounts:
+        - name: model-volume
+          mountPath: /model
+        startupProbe:
+          httpGet:
+            path: /v1/models
+            port: 8002
+          initialDelaySeconds: 45
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 36       # ~6-minute loading budget
+        readinessProbe:
+          httpGet:
+            path: /v1/models
+            port: 8002
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8002
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: model-volume
+        hostPath:
+          path: /mnt/models
+          type: DirectoryOrCreate

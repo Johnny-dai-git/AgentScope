@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-qwen7b
+  namespace: llm
+  labels:
+    app: vllm-qwen7b
+    vllm.role: medium-model
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen7b
+  namespaceSelector:
+    matchNames:
+      - llm
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      honorLabels: false

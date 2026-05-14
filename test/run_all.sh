@@ -2,7 +2,7 @@
 # ================================================================
 # run_all.sh — One-command run all tests
 # ----------------------------------------------------------------
-# Execute sequentially: 01_smoke → 02_latency → 03_throughput → 04_hpa → 05_stability,
+# Execute sequentially: 01_smoke → 02_latency → 03_throughput → 05_stability → 06_realistic,
 # all results go to ./results/<timestamp>/, finally generate SUMMARY.md.
 #
 # Usage:
@@ -13,7 +13,6 @@
 #   TEST_ENDPOINT  - LLM API address (default http://localhost/api/v1/chat/completions)
 #   TEST_MODEL     - Model name (default qwen2.5-0.5b)
 #   STABILITY_DURATION - 05 stability test duration (seconds, default 300)
-#   HPA_LOAD_DURATION  - 04 HPA test duration (seconds, default 180)
 # ================================================================
 set -uo pipefail
 
@@ -28,7 +27,7 @@ init_results_dir
 
 # Selectively run subset
 SELECTED=("$@")
-ALL=(smoke latency throughput hpa stability realistic)
+ALL=(smoke latency throughput stability realistic)
 [ ${#SELECTED[@]} -eq 0 ] && SELECTED=("${ALL[@]}")
 
 START_TS=$(date +%s)
@@ -65,7 +64,6 @@ run_one() {
 [[ " ${SELECTED[*]} " =~ " smoke "      ]] && run_one smoke      01_smoke.sh
 [[ " ${SELECTED[*]} " =~ " latency "    ]] && run_one latency    02_latency.sh
 [[ " ${SELECTED[*]} " =~ " throughput " ]] && run_one throughput 03_throughput.sh
-[[ " ${SELECTED[*]} " =~ " hpa "        ]] && run_one hpa        04_hpa.sh
 [[ " ${SELECTED[*]} " =~ " stability "  ]] && run_one stability  05_stability.sh
 [[ " ${SELECTED[*]} " =~ " realistic "  ]] && run_one realistic  06_realistic_load.sh
 
@@ -96,7 +94,7 @@ jq_or_na() {
     echo
     echo "## Status"
     echo
-    for key in smoke latency throughput hpa stability realistic; do
+    for key in smoke latency throughput stability realistic; do
         s="${TEST_STATUS[$key]:-skipped}"
         case "${s}" in
             ok)      icon="✅" ;;
@@ -156,33 +154,6 @@ jq_or_na() {
             avg=$(jq_or_na "${RESULTS_DIR}/03_throughput.json" ".scenarios.${sc}.avg_latency_ms")
             echo "| ${sc} | ${cnt} | ${conc} | ${wall} | ${tps} | ${avg} |"
         done
-        echo
-    fi
-
-    # ========== 04 hpa ==========
-    if [ -f "${RESULTS_DIR}/04_hpa.json" ]; then
-        echo "## 04 — HPA Autoscaling"
-        echo
-        status=$(jq_or_na "${RESULTS_DIR}/04_hpa.json" .status)
-        if [ "${status}" = "skipped" ]; then
-            echo "_skipped: HPA 'vllm-worker' not found_"
-        else
-            init=$(jq_or_na "${RESULTS_DIR}/04_hpa.json" .initial_replicas)
-            peak=$(jq_or_na "${RESULTS_DIR}/04_hpa.json" .peak_replicas)
-            final=$(jq_or_na "${RESULTS_DIR}/04_hpa.json" .final_replicas)
-            triggered=$(jq_or_na "${RESULTS_DIR}/04_hpa.json" .hpa_triggered)
-            min=$(jq_or_na "${RESULTS_DIR}/04_hpa.json" .hpa_min)
-            max=$(jq_or_na "${RESULTS_DIR}/04_hpa.json" .hpa_max)
-            echo "- HPA range: \`[${min} .. ${max}]\`"
-            echo "- replicas: initial=${init}, **peak=${peak}**, final=${final}"
-            if [ "${triggered}" = "true" ]; then
-                echo "- ✅ HPA successfully triggered scale-up"
-            else
-                echo "- ⚠️  HPA did not scale (insufficient load / metrics not ready / threshold too high)"
-            fi
-            echo
-            echo "Timeline in \`04_hpa_timeline.txt\` (one line every 5 seconds)."
-        fi
         echo
     fi
 

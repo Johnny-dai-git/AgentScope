@@ -453,30 +453,21 @@ if [ -n "${GRAFANA_POD}" ]; then
 fi
 
 # ================================================================
-# HPA: metrics-server + prometheus-adapter
-# Same pattern: prepull first, then helm install
+# metrics-server — used by `kubectl top` for cluster resource visibility.
+# HPA has been removed from this repo, so prometheus-adapter is no
+# longer installed; metrics-server stays because it's still useful for
+# manual inspection of pod CPU / memory.
 # ================================================================
 prepull_helm_images metrics-server metrics-server/metrics-server kube-system \
     --set 'args={--kubelet-insecure-tls,--kubelet-preferred-address-types=InternalIP}'
 
-echo "===== Installing metrics-server (CPU/memory HPA) ====="
+echo "===== Installing metrics-server (for kubectl top) ====="
 helm upgrade --install metrics-server metrics-server/metrics-server \
   -n kube-system \
   --set 'args={--kubelet-insecure-tls,--kubelet-preferred-address-types=InternalIP}' \
   --reuse-values=false \
   --wait --timeout 5m \
   || echo "⚠️  metrics-server helm timeout, continue"
-
-prepull_helm_images prometheus-adapter prometheus-community/prometheus-adapter monitoring \
-    -f "${CONTROL_DIR}/helm/monitoring/prometheus-adapter-values.yaml"
-
-echo "===== Installing prometheus-adapter (custom metrics HPA) ====="
-helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapter \
-  -n monitoring \
-  -f "${CONTROL_DIR}/helm/monitoring/prometheus-adapter-values.yaml" \
-  --reuse-values=false \
-  --wait --timeout 5m \
-  || echo "⚠️  prometheus-adapter helm timeout, continue"
 
 # ================================================================
 # Landing Page

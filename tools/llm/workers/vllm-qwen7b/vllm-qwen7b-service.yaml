@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen7b-service
+  namespace: llm
+  labels:
+    app: vllm-qwen7b
+    vllm.role: medium-model
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-qwen7b
+  ports:
+    - name: http
+      port: 8002
+      targetPort: 8002
+      protocol: TCP

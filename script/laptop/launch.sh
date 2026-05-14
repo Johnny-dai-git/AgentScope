@@ -368,23 +368,15 @@ if [ "${HAS_GPU}" -eq 1 ]; then
 fi
 
 # ================================================================
-# HPA support: metrics-server + prometheus-adapter
+# metrics-server — used by `kubectl top` for cluster resource visibility.
+# HPA has been removed from this repo, so prometheus-adapter is no
+# longer installed; metrics-server stays because it's still useful for
+# manual inspection of pod CPU / memory.
 # ================================================================
-# metrics-server: provides K8s resource metrics (CPU/memory), required for HPA Resource type
-# --kubelet-insecure-tls needed on kubeadm clusters with self-signed certs, use proper cert in prod
-echo "===== Installing metrics-server (for CPU/memory HPA) ====="
+echo "===== Installing metrics-server (for kubectl top) ====="
 helm upgrade --install metrics-server metrics-server/metrics-server \
   -n kube-system \
   --set 'args={--kubelet-insecure-tls,--kubelet-preferred-address-types=InternalIP}' \
-  --reuse-values=false \
-  --wait --timeout 5m
-
-# prometheus-adapter: convert any Prometheus metric to K8s custom metrics API
-# Enable HPA based on business metrics like vllm:num_requests_waiting
-echo "===== Installing prometheus-adapter (for custom metrics HPA) ====="
-helm upgrade --install prometheus-adapter prometheus-community/prometheus-adapter \
-  -n monitoring \
-  -f "${CONTROL_DIR}/helm/monitoring/prometheus-adapter-values.yaml" \
   --reuse-values=false \
   --wait --timeout 5m
 

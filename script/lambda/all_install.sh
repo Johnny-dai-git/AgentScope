@@ -139,22 +139,40 @@ else
 fi
 
 ##############################################
-# 5. Auto-configure MIG (7× 1g.5gb)
+# 5. Auto-configure MIG (A100 80GB, mixed profile layout)
 # ----------------------------------------------------------------
-# A100 uses 7× 1g.5gb MIG instances for hardware isolation, the core
-# point of GCP_BRANCH narrative ("laptop software time-slicing → A100 hardware MIG").
+# Layout (consumes the full 7-GPC budget on a single A100 80GB):
 #
-# Fully automatic:
-#   1. If MIG mode not enabled → enable it
-#   2. If instance count is not 7 → clean up remnants + recreate 7
-#   3. profile ID queried dynamically (may vary by driver version, not hardcoded to 19)
+#   ┌──────────────────┬─────────┬───────────────────────────────────┐
+#   │ MIG profile      │ Count   │ Purpose                           │
+#   ├──────────────────┼─────────┼───────────────────────────────────┤
+#   │ 3g.40gb          │   1     │ Qwen 14B  (exclusive, no sharing) │
+#   │ 2g.20gb          │   1     │ Qwen 7B   (exclusive, no sharing) │
+#   │ 1g.10gb          │   2     │ small models pool (time-sliced)   │
+#   └──────────────────┴─────────┴───────────────────────────────────┘
 #
-# Idempotent: running N times yields the same result; if 7 instances exist, skip creation.
+#   GPC budget : 3 + 2 + 1 + 1 = 7 ✓
+#   VRAM total : 40 + 20 + 10 + 10 = 80 GB ✓
+#   K8s sees   : nvidia.com/mig-3g.40gb, nvidia.com/mig-2g.20gb,
+#                nvidia.com/mig-1g.10gb (with replicas=4 per MIG via
+#                time-slicing → 8 schedulable slots for small models)
+#
+# Why 2× 1g.10gb instead of 1× 2g.20gb for the small pool:
+#   With nvidia-device-plugin `mixed` strategy, K8s sees two same-profile
+#   MIG instances as a single fungible resource — you can't say "Qwen 7B
+#   gets one 2g.20gb exclusively and the other gets shared". Using a
+#   distinct profile (1g.10gb) for the pool gives K8s a clean way to
+#   keep Qwen 7B's MIG truly exclusive.
+#
+# Fully automatic & idempotent: enables MIG if needed, cleans up
+# partial state, dynamically queries profile IDs (driver version
+# independent), and skips creation when the expected 4-instance layout
+# is already in place.
 #
 # ⚠️ Prerequisite: no CUDA processes on GPU, else -mig 1 fails.
 # Lambda bare metal usually fine at boot.
 ##############################################
-echo "[6/6] Auto-configure MIG (7× 1g.5gb)"
+echo "[6/6] Auto-configure MIG (1× 3g.40gb + 1× 2g.20gb + 2× 1g.10gb)"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
     echo "  ⚠️  nvidia-smi not found — Lambda image should have driver, check system"
@@ -179,50 +197,88 @@ if [ "$MIG_MODE" != "Enabled" ]; then
     fi
 fi
 
-# ---- 5.2 Count current instances ----
+# ---- 5.2 Count current instances (target = 4) ----
+TARGET_COUNT=4
 MIG_INSTANCES=$(nvidia-smi -L 2>/dev/null | grep -c "MIG" || true)
-echo "  ➡ Current MIG instance count = ${MIG_INSTANCES}"
+echo "  ➡ Current MIG instance count = ${MIG_INSTANCES} (target=${TARGET_COUNT})"
 
-if [ "$MIG_INSTANCES" -eq 7 ]; then
-    echo "  ✓ Already have 7 MIG instances, skip creation"
+# Verify existing layout matches expectation before skipping
+if [ "$MIG_INSTANCES" -eq "$TARGET_COUNT" ]; then
+    EXISTING_3G=$(nvidia-smi -L 2>/dev/null | grep -c "MIG 3g\.40gb" || true)
+    EXISTING_2G=$(nvidia-smi -L 2>/dev/null | grep -c "MIG 2g\.20gb" || true)
+    EXISTING_1G=$(nvidia-smi -L 2>/dev/null | grep -c "MIG 1g\.10gb" || true)
+    if [ "$EXISTING_3G" -eq 1 ] && [ "$EXISTING_2G" -eq 1 ] && [ "$EXISTING_1G" -eq 2 ]; then
+        echo "  ✓ Layout already correct (3g.40gb×1 + 2g.20gb×1 + 1g.10gb×2), skip creation"
+        SKIP_CREATE=1
+    else
+        echo "  ➡ ${MIG_INSTANCES} instances exist but layout differs (3g=${EXISTING_3G}, 2g=${EXISTING_2G}, 1g=${EXISTING_1G}); will rebuild"
+        SKIP_CREATE=0
+    fi
 else
-    # ---- 5.3 Clean up residual instances (if any) ----
+    SKIP_CREATE=0
+fi
+
+if [ "${SKIP_CREATE:-0}" -ne 1 ]; then
+    # ---- 5.3 Clean up any residual instances ----
     if [ "$MIG_INSTANCES" -gt 0 ]; then
-        echo "  ➡ Have ${MIG_INSTANCES} incomplete instances, destroying all CI + GI"
+        echo "  ➡ Destroying all existing CI + GI to start fresh"
         # Order matters: must destroy CI first, then GI
         sudo nvidia-smi mig -dci 2>/dev/null || true
         sudo nvidia-smi mig -dgi 2>/dev/null || true
     fi
 
-    # ---- 5.4 Dynamically query 1g.5gb profile ID ----
-    # nvidia-smi mig -lgip output format:
-    #   |   0  MIG 1g.5gb        19     7/7        4864 MB    No  ...
-    # 5th column (left to right, excluding |) is profile ID.
-    PROFILE_ID=$(nvidia-smi mig -lgip 2>/dev/null \
-                  | grep -E "MIG[[:space:]]+1g\.5gb" \
-                  | head -1 \
-                  | awk '{print $5}')
+    # ---- 5.4 Dynamically query profile IDs (driver-version independent) ----
+    # `nvidia-smi mig -lgip` lists rows like:
+    #   |   0  MIG 3g.40gb        9      1/1        40192 MB ...
+    #   |   0  MIG 2g.20gb       14      2/2        19968 MB ...
+    #   |   0  MIG 1g.10gb       19      4/4         9728 MB ...
+    # 5th whitespace-token (after the leading "|") is the profile ID.
+    query_profile_id() {
+        local label="$1"
+        nvidia-smi mig -lgip 2>/dev/null \
+          | grep -E "MIG[[:space:]]+${label}([[:space:]]|$)" \
+          | head -1 \
+          | awk '{print $5}'
+    }
 
-    if [ -z "$PROFILE_ID" ]; then
-        echo "  ⚠️  Cannot find 1g.5gb profile, this GPU may not support it"
-        echo "      Available profiles:"
-        nvidia-smi mig -lgip
-        exit 1
-    fi
-    echo "  ➡ 1g.5gb profile ID = ${PROFILE_ID}"
+    PID_3G=$(query_profile_id '3g\.40gb')
+    PID_2G=$(query_profile_id '2g\.20gb')
+    PID_1G=$(query_profile_id '1g\.10gb')
 
-    # ---- 5.5 Create 7× GI + CI (one command, -C auto-creates CI) ----
-    echo "  ➡ Creating 7× 1g.5gb GI+CI..."
+    for triple in "3g.40gb:${PID_3G}" "2g.20gb:${PID_2G}" "1g.10gb:${PID_1G}"; do
+        label=${triple%%:*}
+        pid=${triple##*:}
+        if [ -z "$pid" ]; then
+            echo "  ⚠️  Cannot find profile ${label} — wrong GPU model?"
+            echo "      Available profiles on this card:"
+            nvidia-smi mig -lgip
+            echo ""
+            echo "      Reminder: this layout is for A100 80GB. On A100 40GB"
+            echo "      the largest profile is 3g.20gb (not 3g.40gb)."
+            exit 1
+        fi
+    done
+    echo "  ➡ Profile IDs:   3g.40gb=${PID_3G}, 2g.20gb=${PID_2G}, 1g.10gb=${PID_1G}"
+
+    # ---- 5.5 Create 4 GI + CI ----
+    # Order matters: nvidia-smi places GIs in decreasing-size order, so
+    # listing 3g first guarantees it gets the contiguous slice it needs.
+    # `-C` auto-creates the default (full-size) Compute Instance inside
+    # each GI in one shot.
+    echo "  ➡ Creating GI+CI: 1× 3g.40gb, 1× 2g.20gb, 2× 1g.10gb"
     sudo nvidia-smi mig -cgi \
-        "${PROFILE_ID},${PROFILE_ID},${PROFILE_ID},${PROFILE_ID},${PROFILE_ID},${PROFILE_ID},${PROFILE_ID}" \
+        "${PID_3G},${PID_2G},${PID_1G},${PID_1G}" \
         -C
 
     # ---- 5.6 Verify ----
     FINAL_COUNT=$(nvidia-smi -L 2>/dev/null | grep -c "MIG" || true)
-    if [ "$FINAL_COUNT" -eq 7 ]; then
-        echo "  ✓ 7 MIG instances created successfully"
+    FINAL_3G=$(nvidia-smi -L 2>/dev/null | grep -c "MIG 3g\.40gb" || true)
+    FINAL_2G=$(nvidia-smi -L 2>/dev/null | grep -c "MIG 2g\.20gb" || true)
+    FINAL_1G=$(nvidia-smi -L 2>/dev/null | grep -c "MIG 1g\.10gb" || true)
+    if [ "$FINAL_COUNT" -eq "$TARGET_COUNT" ] && [ "$FINAL_3G" -eq 1 ] && [ "$FINAL_2G" -eq 1 ] && [ "$FINAL_1G" -eq 2 ]; then
+        echo "  ✓ MIG layout created (3g.40gb×1 + 2g.20gb×1 + 1g.10gb×2)"
     else
-        echo "  ⚠️  Actually created ${FINAL_COUNT} instances (expected 7), check:"
+        echo "  ⚠️  Got 3g=${FINAL_3G}, 2g=${FINAL_2G}, 1g=${FINAL_1G} (total=${FINAL_COUNT}, expected 1/1/2). Check:"
         nvidia-smi -L
         exit 1
     fi

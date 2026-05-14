@@ -284,27 +284,27 @@ data:
             <span class="tech">ArgoCD</span>
             <span class="tech">Prometheus</span>
             <span class="tech">Grafana</span>
-            <span class="tech">HPA v2</span>
+            <span class="tech">A100 MIG</span>
             <span class="tech">GitHub Actions</span>
           </div>
         </div>
 
         <div class="stats">
           <div class="stat">
-            <div class="stat-value">0.5B</div>
-            <div class="stat-label">Qwen 2.5 fp16</div>
+            <div class="stat-value">5</div>
+            <div class="stat-label">Models served</div>
           </div>
           <div class="stat">
-            <div class="stat-value">1↔7</div>
-            <div class="stat-label">HPA replicas</div>
+            <div class="stat-value">14B</div>
+            <div class="stat-label">Largest (Qwen2.5)</div>
           </div>
           <div class="stat">
-            <div class="stat-value">5 GB</div>
-            <div class="stat-label">VRAM / replica (MIG)</div>
+            <div class="stat-value">3 / 2 / 1 g</div>
+            <div class="stat-label">MIG profiles in use</div>
           </div>
           <div class="stat">
             <div class="stat-value">A100</div>
-            <div class="stat-label">40 GB · 7× MIG 1g.5gb</div>
+            <div class="stat-label">80 GB · mixed MIG</div>
           </div>
         </div>
 
@@ -358,23 +358,23 @@ data:
         <div class="highlights">
           <div class="hl">
             <span class="hl-icon">⚙️</span>
-            <div class="hl-title">A100 + MIG isolation</div>
-            <div class="hl-desc">1 physical A100 → 7 hardware-isolated MIG instances (1g.5gb each), one vllm pod per MIG. True memory + compute isolation, no noisy-neighbor risk.</div>
+            <div class="hl-title">Mixed-profile A100 MIG</div>
+            <div class="hl-desc">A100 80GB carved into 3g.40gb (Qwen 14B), 2g.20gb (Qwen 7B), and 2× 1g.10gb time-sliced into 8 slots for the small models pool.</div>
           </div>
           <div class="hl">
-            <span class="hl-icon">📈</span>
-            <div class="hl-title">Custom-metrics HPA</div>
-            <div class="hl-desc">Autoscales on vLLM num_requests_waiting queue depth via prometheus-adapter — not CPU.</div>
+            <span class="hl-icon">🧱</span>
+            <div class="hl-title">Hardware isolation where it matters</div>
+            <div class="hl-desc">Big models get dedicated MIG instances (no noisy neighbor on KV cache). Small models share via software time-slicing — fine for 0.5–3B sizes.</div>
           </div>
           <div class="hl">
             <span class="hl-icon">🚀</span>
             <div class="hl-title">GitOps with ArgoCD</div>
-            <div class="hl-desc">Image Updater detects new tags from GHCR; selfHeal auto-syncs; ignoreDifferences for HPA fields.</div>
+            <div class="hl-desc">Image Updater detects new tags from GHCR; selfHeal auto-syncs; ArgoCD fully owns Deployment.spec.replicas (no HPA fighting back).</div>
           </div>
           <div class="hl">
             <span class="hl-icon">🧪</span>
-            <div class="hl-title">6-stage test suite</div>
-            <div class="hl-desc">Functional, latency P50-P99, throughput, HPA scaling, sustained load, realistic random-prompt load.</div>
+            <div class="hl-title">5-stage test suite</div>
+            <div class="hl-desc">Functional, latency P50-P99, throughput, sustained load, realistic random-prompt load.</div>
           </div>
         </div>
 

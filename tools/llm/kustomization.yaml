@@ -14,10 +14,25 @@ resources:
   - web/llm-web-service.yaml
   - web/llm-web-nginx-configmap.yaml
 
-  # Workers (vLLM only; TensorRT scaffolding removed)
-  - workers/vllm/vllm-worker-deployment.yaml
-  - workers/vllm/vllm-worker-service.yaml
-  - workers/vllm/vllm-servicemonitor.yaml
+  # Workers — one Deployment per model on A100 80GB MIG tiers
+  #   3g.40gb (exclusive)              → Qwen 14B
+  - workers/vllm-qwen14b/vllm-qwen14b-deployment.yaml
+  - workers/vllm-qwen14b/vllm-qwen14b-service.yaml
+  - workers/vllm-qwen14b/vllm-qwen14b-servicemonitor.yaml
+  #   2g.20gb (exclusive)              → Qwen 7B
+  - workers/vllm-qwen7b/vllm-qwen7b-deployment.yaml
+  - workers/vllm-qwen7b/vllm-qwen7b-service.yaml
+  - workers/vllm-qwen7b/vllm-qwen7b-servicemonitor.yaml
+  #   1g.10gb × 2, time-sliced into 8 slots → 3 small models share
+  - workers/vllm-qwen-small/vllm-qwen-small-deployment.yaml
+  - workers/vllm-qwen-small/vllm-qwen-small-service.yaml
+  - workers/vllm-qwen-small/vllm-qwen-small-servicemonitor.yaml
+  - workers/vllm-tinyllama/vllm-tinyllama-deployment.yaml
+  - workers/vllm-tinyllama/vllm-tinyllama-service.yaml
+  - workers/vllm-tinyllama/vllm-tinyllama-servicemonitor.yaml
+  - workers/vllm-llama3/vllm-llama3-deployment.yaml
+  - workers/vllm-llama3/vllm-llama3-service.yaml
+  - workers/vllm-llama3/vllm-llama3-servicemonitor.yaml
 
   # Ingress
   - ingress/unified-ingress.yaml

@@ -2,7 +2,7 @@
 
 Self-hosted, Kubernetes-based LLM inference platform. OpenAI-compatible API on top of vLLM, fully observable, with GitOps continuous deployment.
 
-> **This branch (`GCP_BRANCH`) targets a bare-metal Lambda Labs A100 instance with MIG (Multi-Instance GPU).** The branch is named `GCP_BRANCH` for historical reasons (initially scoped to GKE) — the actual deployment turned out to be Lambda Labs. For the laptop reference deployment (kubeadm + RTX 4050 + GPU time-slicing), see the [`telemetry`](https://github.com/Johnny-dai-git/llm-deployment/tree/telemetry) branch.
+> **This branch targets a bare-metal Lambda Labs A100 80GB instance with mixed-profile MIG.** A single physical A100 is partitioned into one 3g.40gb slice (Qwen 14B, exclusive), one 2g.20gb slice (Qwen 7B, exclusive), and 2× 1g.10gb slices time-sliced into 8 schedulable slots for a small-model pool (Qwen 0.5B / TinyLlama 1.1B / Llama 3.2-3B). HPA has been removed — every Deployment runs at `replicas: 1` and the operator sizes things directly. For the laptop reference deployment (kubeadm + RTX 4050 + GPU time-slicing), see the [`telemetry`](https://github.com/Johnny-dai-git/llm-deployment/tree/telemetry) branch of llm-deployment.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -16,21 +16,21 @@ Self-hosted, Kubernetes-based LLM inference platform. OpenAI-compatible API on t
                 │ /api                        │ /web
                 ▼                             ▼
     ┌──────────────────┐            ┌──────────────────┐
-    │  llm-api         │ ◄─ HPA ◄─  │  llm-web         │
-    │  (FastAPI)       │  CPU>60%   │  (nginx + SSE)   │
-    │  - auth          │  1↔3 reps  └──────────────────┘
+    │  llm-api         │            │  llm-web         │
+    │  (FastAPI)       │            │  (nginx + SSE)   │
+    │  - auth          │            └──────────────────┘
     │  - SSE streaming │
     └────────┬─────────┘
              │ HTTP (OpenAI compatible)
              ▼
-    ┌──────────────────┐ ◄─ HPA ◄─  vllm:num_requests_waiting > 5
-    │  vllm-worker     │  custom    1↔2 reps (GPU slot-bound)
-    │  (vLLM + GPU)    │  metric
+    ┌──────────────────┐
+    │  vllm-worker     │
+    │  (vLLM + GPU)    │
     │  - PagedAttn     │
     │  - cont. batching│
     └──────────────────┘
 
-   Scaled by:    HPA + metrics-server (CPU) + prometheus-adapter (custom)
+   Sizing:       static replicas in each Deployment (no HPA)
    Observed by:  Prometheus + Grafana + DCGM exporter
    Deployed by:  ArgoCD + ArgoCD Image Updater (GitOps)
    Built by:     GitHub Actions self-hosted runner → GHCR
@@ -39,13 +39,21 @@ Self-hosted, Kubernetes-based LLM inference platform. OpenAI-compatible API on t
 ## What's Inside
 
 - **OpenAI-compatible API** with SSE streaming for chat completions
-- **GPU inference** via vLLM (currently `Qwen2.5-0.5B-Instruct` fp16)
-- **GitOps deployment** via ArgoCD watching this branch (`GCP_BRANCH`)
-- **Auto image updates** via ArgoCD Image Updater watching GHCR
-- **Full observability**: Prometheus + Grafana + DCGM (GPU metrics) + ServiceMonitors for the business services
-- **Autoscaling**: HPA on `llm-api` (CPU) and `vllm-worker` (vLLM queue depth via prometheus-adapter), 1↔7 replicas on a single A100
-- **MIG (Multi-Instance GPU)** carves one A100 (40 GB) into 7 hardware-isolated 1g.5gb instances, one vllm pod per MIG instance — true memory + compute isolation, no noisy-neighbor risk
-- **Self-hosted CI**: GitHub Actions self-hosted runner builds and pushes images on every commit to `main` / `telemetry` / `GCP_BRANCH`
+- **Five GPU-inference workers**, one Deployment per model, each pinned to a MIG slice:
+
+  | Worker pod | MIG slice | Model |
+  |---|---|---|
+  | `vllm-qwen14b` | `mig-3g.40gb` × 1 (exclusive) | Qwen2.5-14B-Instruct |
+  | `vllm-qwen7b` | `mig-2g.20gb` × 1 (exclusive) | Qwen2.5-7B-Instruct |
+  | `vllm-qwen-small` | `mig-1g.10gb` × 1 (time-sliced) | Qwen2.5-0.5B-Instruct |
+  | `vllm-tinyllama` | `mig-1g.10gb` × 1 (time-sliced) | TinyLlama-1.1B-Chat |
+  | `vllm-llama3` | `mig-1g.10gb` × 1 (time-sliced) | Llama-3.2-3B-Instruct |
+
+- **Mixed-profile MIG** on one A100 80GB: big models get hardware isolation; small models share via software time-slicing on top of the 1g.10gb slices.
+- **GitOps deployment** via ArgoCD; ArgoCD fully owns `Deployment.spec.replicas` (no HPA tug-of-war).
+- **Auto image updates** via ArgoCD Image Updater watching GHCR for `v-YYYYMMDD-HHMMSS` tags.
+- **Full observability**: Prometheus + Grafana + DCGM (GPU metrics) + a ServiceMonitor per worker.
+- **Self-hosted CI**: GitHub Actions self-hosted runner builds and pushes images on every commit.
 
 ## Quick Start (laptop)
 
@@ -93,8 +101,13 @@ llm-deployment/
 │
 ├── tools/                            # Kubernetes manifests (GitOps source of truth)
 │   ├── llm/                          # Business namespace (kustomized)
-│   │   ├── api/                      # llm-api Deployment + Service + ServiceMonitor + HPA
-│   │   ├── workers/vllm/             # vllm-worker Deployment + Service + SM + HPA
+│   │   ├── api/                      # llm-api Deployment + Service + ServiceMonitor
+│   │   ├── workers/
+│   │   │   ├── vllm-qwen14b/         # 3g.40gb MIG (exclusive)
+│   │   │   ├── vllm-qwen7b/          # 2g.20gb MIG (exclusive)
+│   │   │   ├── vllm-qwen-small/      # 1g.10gb time-slice slot (also exports vllm-worker-service alias)
+│   │   │   ├── vllm-tinyllama/       # 1g.10gb time-slice slot
+│   │   │   └── vllm-llama3/          # 1g.10gb time-slice slot
 │   │   ├── web/                      # web Deployment + Service + nginx ConfigMap
 │   │   ├── ingress/                  # /api and /web routing
 │   │   ├── landing/                  # /landing page
@@ -104,9 +117,8 @@ llm-deployment/
 │   │   ├── argocd/values.yaml
 │   │   └── monitoring/
 │   │       ├── kps-values.yaml       # kube-prometheus-stack values
-│   │       ├── dcgm/values.yaml      # NVIDIA DCGM exporter values
-│   │       └── prometheus-adapter-values.yaml  # custom metrics for HPA
-│   └── system/                       # Cluster-level: NVIDIA device plugin, RuntimeClass
+│   │       └── dcgm/values.yaml      # NVIDIA DCGM exporter values
+│   └── system/                       # Cluster-level: NVIDIA device plugin (mixed MIG strategy), RuntimeClass
 │
 ├── script/                           # Bootstrap scripts split per environment
 │   ├── laptop/                       # Single-node laptop bootstrap
@@ -186,8 +198,7 @@ This builds and pushes all three service images directly to GHCR using the same 
 | `argocd-image-updater` | Watches GHCR for new tags |
 | `kube-prometheus-stack` | Prometheus + Grafana + Alertmanager + node-exporter + kube-state-metrics |
 | `dcgm-exporter` | NVIDIA GPU metrics |
-| `metrics-server` | Resource metrics for HPA |
-| `prometheus-adapter` | Translates Prometheus series into K8s Custom Metrics API for HPA |
+| `metrics-server` | Cluster resource metrics (used by `kubectl top`; left in even after HPA removal) |
 
 ### Probes Strategy
 
@@ -198,44 +209,25 @@ Every Pod has the full `startupProbe + readinessProbe + livenessProbe` triplet:
 
 ### Monitoring Layer
 
-Business metrics actually flow into Prometheus via `ServiceMonitor` resources:
+Business metrics flow into Prometheus via `ServiceMonitor` resources — one per worker plus one for the gateway:
 
 - `tools/llm/api/api-servicemonitor.yaml` — exposes `llm_api_requests_total`, `llm_api_request_latency_seconds`
-- `tools/llm/workers/vllm/vllm-servicemonitor.yaml` — exposes vLLM's rich metrics (`vllm:e2e_request_latency_seconds`, `vllm:gpu_cache_usage_perc`, `vllm:num_requests_running`, `vllm:num_requests_waiting`, etc.)
+- `tools/llm/workers/vllm-qwen14b/vllm-qwen14b-servicemonitor.yaml` (and equivalents for `vllm-qwen7b`, `vllm-qwen-small`, `vllm-tinyllama`, `vllm-llama3`) — each exposes vLLM's metrics (`vllm:e2e_request_latency_seconds`, `vllm:gpu_cache_usage_perc`, `vllm:num_requests_running`, `vllm:num_requests_waiting`, etc.) labeled by pod so you can compare models in Grafana.
 
 The `kube-prometheus-stack` selectors are wide open (`{}`) so any ServiceMonitor in any namespace gets scraped — appropriate for a single-team setup.
 
-### Autoscaling (HPA)
+### Scaling Strategy (no HPA)
 
-Both compute services scale horizontally on real load signals — not on a static replica count. The two HPAs use **different metric backends** because the two services are bottlenecked by different things:
+This branch deliberately runs every Deployment at `replicas: 1`. Capacity is sized by giving each model the MIG slice that fits it, not by adding pods:
 
-```
-llm-api HPA  (CPU-bound)               vllm-worker HPA  (GPU-bound)
-  metric source: metrics-server          metric source: prometheus-adapter
-  signal: cpu utilization > 60%          signal: vllm:num_requests_waiting > 5/pod
-  range:  1 ↔ 3 replicas                 range:  1 ↔ 2 replicas
-  scaleUp: +100% / 60s                   scaleUp: +1 pod / 120s
-  scaleDown: -50% / 120s                 scaleDown: -1 pod / 300s
-```
+- **Big models** (14B / 7B) are GPU-bound and bottlenecked by VRAM; each owns a dedicated MIG instance so KV cache and prefill compute aren't fighting anyone.
+- **Small models** time-slice the 1g.10gb pool — adding more replicas of the *same* small model wouldn't help much because they'd just compete for the same 10 GB.
 
-**Why different metrics?**
+If you need more headroom, the supported moves are:
 
-CPU utilization is the right knob for `llm-api` — its work is JSON serialization + httpx forwarding, which loads CPU proportionally to traffic. For `vllm-worker`, CPU is meaningless (the bottleneck is the GPU), so we scale on vLLM's own queue depth: when `num_requests_waiting` per pod stays high, we add another worker.
-
-**Why is `vllm-worker` capped at 2?**
-
-The `nvidia-device-plugin` is configured for time-slicing into 2 slots on a single GPU (`tools/system/nvidia-device-plugin.yaml`). Asking K8s for a third `nvidia.com/gpu: 1` would Pend forever. On the Lambda Labs A100 deployment (this branch) the plugin is switched to MIG `single` strategy with 7× 1g.5gb instances, bumping the HPA range to `1↔7`.
-
-**Components required for HPA to work** (all installed by `launch.sh`):
-
-| Component | Provides | Used by |
-|---|---|---|
-| `metrics-server` | CPU/memory resource metrics | `llm-api` HPA |
-| `prometheus-adapter` | `vllm:*` Prometheus series exposed as Custom Metrics API | `vllm-worker` HPA |
-| `kube-prometheus-stack` | The Prometheus that prometheus-adapter reads from | upstream of prometheus-adapter |
-| ServiceMonitors in `tools/llm/` | Make sure `vllm:*` series actually flow into Prometheus | upstream of prometheus-adapter |
-
-**Conservative scaleDown timings** (long stabilization window) are intentional: tearing down a `vllm-worker` Pod loses its KV cache and forces the next request to JIT-compile CUDA kernels again. We trade a few extra minutes of an idle pod for a smoother experience.
+1. Add a second A100 node and double the MIG budget (and bump `replicas:` on whichever model is hot).
+2. Swap to a bigger MIG profile for a specific model (e.g. give Qwen 7B its own 3g.40gb if 14B isn't in use).
+3. Reintroduce HPA on a specific worker — manifests under `tools/llm/workers/` are independent, so you can add an `*-hpa.yaml` to just one of them without it spreading.
 
 ## Common Tasks
 
@@ -257,79 +249,62 @@ git push origin telemetry
 ```bash
 kubectl get pods -A                                           # everything
 kubectl get pods -n llm                                       # business namespace
-kubectl logs -n llm -l app=llm-api -f                         # live logs
+kubectl logs -n llm -l app=vllm-qwen14b -f                    # live logs for one worker
 kubectl describe pod -n llm <pod>                             # one pod's full state
-kubectl get hpa -n llm                                        # autoscaler status
 kubectl get servicemonitor -n llm                             # what Prometheus is scraping
+kubectl top pod -n llm                                        # CPU / memory (via metrics-server)
 ```
 
 ### Verify metrics flow
 
 ```bash
-# After launch, in Prometheus UI:
+# After launch, open Prometheus targets:
 http://localhost/prometheus/targets
 
-# Should see UP:
+# Should see UP for each ServiceMonitor (one per worker + the gateway):
 #   serviceMonitor/llm/llm-api/0
-#   serviceMonitor/llm/vllm-worker/0
-#   serviceMonitor/monitoring/dcgm-exporter/0   (only if GPU)
+#   serviceMonitor/llm/vllm-qwen14b/0
+#   serviceMonitor/llm/vllm-qwen7b/0
+#   serviceMonitor/llm/vllm-qwen-small/0
+#   serviceMonitor/llm/vllm-tinyllama/0
+#   serviceMonitor/llm/vllm-llama3/0
+#   serviceMonitor/monitoring/dcgm-exporter/0
 
-# Useful PromQL:
+# Useful PromQL (per-pod via {pod="..."} or {served_model_name="..."}):
 llm_api_requests_total
 vllm:num_requests_running
+vllm:gpu_cache_usage_perc
 DCGM_FI_DEV_GPU_UTIL
 ```
 
-### Verify HPA is wired up
+### Send a real request to one model
 
 ```bash
-# 1. The two HPAs should be present:
-kubectl get hpa -n llm
-# NAME          REFERENCE                TARGETS         MINPODS   MAXPODS   REPLICAS
-# llm-api       Deployment/llm-api       12%/60%, ...    1         3         1
-# vllm-worker   Deployment/vllm-worker   0/5             1         2         1
-
-# 2. metrics-server is supplying CPU/memory metrics:
-kubectl top pod -n llm
-# NAME                CPU(cores)   MEMORY(bytes)
-# llm-api-xxx         5m           80Mi
-# vllm-worker-xxx     ...
-
-# 3. prometheus-adapter is exposing the custom metric used by vllm-worker HPA:
-kubectl get --raw \
-  "/apis/custom.metrics.k8s.io/v1beta1/namespaces/llm/pods/*/vllm_num_requests_waiting" \
-  | jq
-
-# If the URL above returns "no metrics returned" before any traffic, that's
-# expected — vLLM only emits the series after the first request.
-```
-
-### Trigger a real load test (and watch HPA react)
-
-```bash
-# Install hey
-sudo apt install hey
-
-# Hit the gateway hard
-hey -n 1000 -c 50 -m POST \
+# Hit the small-pool gateway alias (which the existing llm-api still points at):
+curl -sS -X POST http://localhost/api/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"qwen2.5-0.5b","messages":[{"role":"user","content":"hi"}],"max_tokens":50}' \
-  http://localhost/api/v1/chat/completions
+  -d '{"model":"qwen2.5-0.5b","messages":[{"role":"user","content":"hi"}],"max_tokens":50}' | jq
 
-# In another terminal, watch llm-api HPA scale up and replicas go from 1 → 2 → 3
-watch -n 2 'kubectl get hpa -n llm; echo; kubectl get pods -n llm'
-
-# After 5+ minutes idle, scaleDown kicks in and replicas drop back to 1
+# Or hit a specific worker directly via its ClusterIP service (port-forward first):
+kubectl -n llm port-forward svc/vllm-qwen14b-service 8002:8002 &
+curl -sS -X POST http://localhost:8002/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen2.5-14b","messages":[{"role":"user","content":"hi"}],"max_tokens":50}' | jq
 ```
 
-## Performance — Lambda A100 / MIG (this branch)
+## Historical Performance — earlier A100 40 GB run (7× 1g.5gb MIG + HPA)
 
-End-to-end stress test on **Lambda Labs single-node A100 (40 GB), 7× 1g.5gb MIG, vLLM 0.11, Qwen2.5-0.5B fp16**, hammered through the public ingress (`http://<public-ip>/api/v1/chat/completions`). Reproduce with:
+> ⚠️ The headline numbers below come from an earlier iteration of this
+> branch that ran on an A100 **40 GB** with **7× 1g.5gb MIG** and HPA
+> autoscaling Qwen2.5-0.5B from 1↔7 replicas. The current layout
+> (A100 80 GB, mixed-profile MIG, 5 different models, no HPA) targets
+> a very different question — *multi-model service-quality and
+> isolation*, not single-model throughput. The old run is kept here for
+> reference because it's still the cleanest demonstration of an A100
+> being driven near 100 % GR Engine Active under vLLM.
 
-```bash
-# 12 min, 60 concurrent users, ~2k-token prompts → drives prefill compute, exercises HPA
-./test/run_lambda.sh extreme
-```
+End-to-end stress test, hammered through the public ingress
+(`http://<public-ip>/api/v1/chat/completions`):
 
 ### 08 — Extreme Stress (12 min, concurrency 60, ~2 000-token prompts)
 
@@ -341,11 +316,10 @@ End-to-end stress test on **Lambda Labs single-node A100 (40 GB), 7× 1g.5gb MIG
 | Mean GPU compute (12 min average) | 83.4 % |
 | Peak Tensor Core (DCGM_FI_PROF_PIPE_TENSOR_ACTIVE) | 14.5 % |
 | Mean Tensor Core | 12.5 % |
-| HPA replicas (start → peak) | 1 → **5** (of max 7) |
+| Replicas (start → peak, HPA-driven) | 1 → **5** (of max 7) |
 | MIG instances saturated simultaneously | **5 / 7** |
-| Verdict | ✅ **GPU HOT**, 🟡 HPA partial scale (5/7) |
 
-A 12-min window only fits ~3-4 full HPA scale-up steps after accounting for vLLM cold-start (30-60 s per pod) and the 60 s + 120 s stabilization windows in `vllm-hpa.yaml`. Running `EXTREME_LOAD_DURATION=1200` (20 min) drives the cluster all the way to 7 / 7 replicas.
+A 12-min window only fits ~3-4 full HPA scale-up steps after accounting for vLLM cold-start (30-60 s per pod) and the stabilization windows. Running the test longer drove the old setup all the way to 7 / 7 replicas.
 
 The 14.5 % Tensor Core peak is **expected for this model size** — Qwen2.5-0.5B has ~1 GB of fp16 weights, so even fully batched decode is dominated by memory-bandwidth, not Tensor Core math. To push Tensor Core utilization above 30 %, swap in a 7B-class model (planned, not in this branch yet).
 
@@ -368,16 +342,14 @@ The laptop branch (`telemetry`, RTX 4050 6 GB, GPU time-slicing 2 slots) was the
 
 > ⚠️ The numbers below come from the **laptop reference deployment**
 > (kubeadm + RTX 4050 + time-slicing) on the `telemetry` branch.
-> They're kept here as the lower-bound baseline. The Lambda A100
-> stress-test results above (section "Performance — Lambda A100 / MIG")
-> are this branch's headline numbers; the 6-stage suite below remains
-> useful for apples-to-apples vLLM behavior across hardware.
+> They're kept here as the lower-bound baseline; the test suite under
+> `test/` still produces apples-to-apples vLLM behavior across hardware.
 
 End-to-end benchmark on the laptop reference setup: **single-node K8s, NVIDIA RTX 4050 Laptop (6 GB VRAM, ~192 GB/s mem bandwidth), Qwen2.5-0.5B fp16, vLLM 0.11**. Full raw results live in [`test/results/baseline-pre-optimization/`](test/results/baseline-pre-optimization). Reproduce with:
 
 ```bash
 cd test
-./run_all.sh                 # ~17 min, all 6 stages, generates SUMMARY.md
+./run_all.sh                 # ~15 min, 5 stages (smoke/latency/throughput/stability/realistic), generates SUMMARY.md
 ```
 
 ### 01 — Functional (7 / 7 passed)
@@ -404,13 +376,6 @@ Concurrency 8 P50 only **23% higher** than single-stream — vLLM continuous bat
 | **Long prompt + long output** | **824.2** | 5.82 s | 2.9 s |
 
 Peak **~824 tok/s** under 8-way batched load — about **70-80% of the theoretical memory-bandwidth-bound ceiling** for fp16 Qwen2.5-0.5B on this GPU.
-
-### 04 — HPA Autoscaling (240 s sustained load, concurrency 20)
-
-- HPA range: `[1, 2]` (capped by GPU time-slicing slots)
-- Replicas: initial 1 → **peak 2** ✅
-- Trigger: `vllm:num_requests_waiting` averaged > 5 over a 60 s stabilization window
-- Path: vLLM `/metrics` → Prometheus → prometheus-adapter → HPA v2
 
 ### 05 — Sustained Load Stability (300 s, concurrency 4)
 
@@ -447,13 +412,12 @@ Stages 02 and 03 reuse the same prompt for every request, so vLLM's automatic pr
 
 ## Branches
 
-| Branch | Target | GPU | GPU sharing | HPA range | Storage |
+| Branch | Target | GPU | GPU sharing | Replicas | Storage |
 |---|---|---|---|---|---|
-| [`telemetry`](https://github.com/Johnny-dai-git/llm-deployment/tree/telemetry) | laptop, kubeadm | RTX 4050 6 GB | time-slicing (software, 2 slots) | 1↔2 | hostPath |
-| **`GCP_BRANCH`** *(this branch)* | Lambda Labs (bare A100, kubeadm) | A100 40 GB | **MIG (hardware, 7× 1g.5gb)** | 1↔7 | hostPath (`/mnt/models`) |
-| `main` | stable line | — | — | — | — |
+| [`telemetry`](https://github.com/Johnny-dai-git/llm-deployment/tree/telemetry) | laptop, kubeadm | RTX 4050 6 GB | time-slicing (software, 2 slots) | HPA 1↔2 | hostPath |
+| **this branch** | Lambda Labs (bare A100 80 GB, kubeadm) | A100 80 GB | **MIG mixed** (1× 3g.40gb + 1× 2g.20gb + 2× 1g.10gb) | static `replicas: 1` per model | hostPath (`/mnt/models`) |
 
-Both deploy the same `Qwen2.5-0.5B-Instruct` fp16 model so the gap is purely about the underlying hardware and orchestration. The branch is named `GCP_BRANCH` for historical reasons (initially scoped to GKE) — the realized deployment is a Lambda Labs A100 instance.
+The telemetry branch deploys a single Qwen2.5-0.5B and uses HPA to demonstrate autoscaling. This branch deploys **five models** with hand-sized MIG slices and no HPA — the focus shifts from "scale one model on demand" to "serve a fleet of mixed-size models with hardware isolation where it matters".
 
 ## Real Bugs Hit During Deployment ("War Stories")
 
@@ -495,13 +459,13 @@ markdown — re-run after editing the war stories.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `vllm-worker` Pod stuck in `CrashLoopBackOff` | Model files not present at the hostPath | `bash script/laptop/download-model.sh` |
-| `vllm-worker` Pod `Pending` | No node satisfies `gpu-node=true` + `nvidia.com/gpu: 1` | Confirm `lspci | grep -i nvidia`, check `nvidia-device-plugin` Pod is `Running` in `kube-system` |
-| `llm-api` returns 502 | `vllm-worker` is down or model not loaded | `kubectl logs -n llm -l app=vllm-worker` |
+| A worker Pod stuck in `CrashLoopBackOff` | Model files not present at the hostPath | Extend `script/lambda/download-model.sh` to fetch the model into `/mnt/models/<name>/` |
+| A worker Pod `Pending` | No MIG instance of the requested profile is available | `kubectl describe pod -n llm <pod>` (look for "Insufficient nvidia.com/mig-…"); rerun `script/lambda/all_install.sh` to rebuild MIG |
+| All worker Pods of one profile Pending after node reboot | MIG mode reverted to disabled, or instances destroyed | Re-run `script/lambda/all_install.sh` (idempotent — re-enables MIG and rebuilds the 4 instances) |
+| `llm-api` returns 502 | The pod behind `vllm-worker-service` (the legacy alias = vllm-qwen-small) is down or model not loaded | `kubectl logs -n llm -l app=vllm-qwen-small` |
 | Streaming response arrives all at once instead of token-by-token | ingress-nginx is buffering | Confirm `unified-ingress.yaml` has `nginx.ingress.kubernetes.io/proxy-buffering: "off"` |
 | GHCR push fails with `unauthenticated` during build-and-push.sh | Token revoked or wrong scope | Regenerate GitHub PAT with `write:packages` scope, then `docker logout ghcr.io && docker login ghcr.io -u <user> --password-stdin <<< $TOKEN` |
 | ArgoCD shows `OutOfSync` | Probably normal mid-deploy. If persistent, check the Application's status in `http://localhost/argocd` |
-| HPA shows `<unknown>/<target>` for `vllm-worker` | `prometheus-adapter` not yet healthy or `vllm:num_requests_waiting` series doesn't exist (no traffic yet) | `kubectl get pods -n monitoring | grep prometheus-adapter`; send some traffic so the metric exists |
 
 ## License
 

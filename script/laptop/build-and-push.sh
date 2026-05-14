@@ -150,26 +150,28 @@ main() {
     log_info "Starting build and push process..."
     echo ""
 
-    # Build and push all images (pass version tag)
-    # gateway image includes merged llm-api (original gateway+router merged)
-    build_and_push "gateway" "app/gateway" "app/gateway/Dockerfile" "${VERSION_TAG}"
-    build_and_push "vllm-worker" "app/worker/vllm" "app/worker/vllm/Dockerfile" "${VERSION_TAG}"
-    build_and_push "web" "app/web" "app/web/Dockerfile" "${VERSION_TAG}"
-    
+    # Build and push all 7 images sharing the same version tag.
+    # gateway and web are unchanged; the five per-model worker images
+    # each carry their own business code under app/worker/*/handlers/.
+    build_and_push "gateway"         "app/gateway"               "app/gateway/Dockerfile"               "${VERSION_TAG}"
+    build_and_push "web"             "app/web"                   "app/web/Dockerfile"                   "${VERSION_TAG}"
+    build_and_push "vllm-qwen14b"    "app/worker/vllm-qwen14b"   "app/worker/vllm-qwen14b/Dockerfile"   "${VERSION_TAG}"
+    build_and_push "vllm-qwen7b"     "app/worker/vllm-qwen7b"    "app/worker/vllm-qwen7b/Dockerfile"    "${VERSION_TAG}"
+    build_and_push "vllm-qwen-small" "app/worker/vllm-qwen-small" "app/worker/vllm-qwen-small/Dockerfile" "${VERSION_TAG}"
+    build_and_push "vllm-tinyllama"  "app/worker/vllm-tinyllama" "app/worker/vllm-tinyllama/Dockerfile" "${VERSION_TAG}"
+    build_and_push "vllm-llama3"     "app/worker/vllm-llama3"    "app/worker/vllm-llama3/Dockerfile"    "${VERSION_TAG}"
+
     echo ""
     log_info "=========================================="
-    log_info "All images built and pushed successfully!"
+    log_info "All 7 images built and pushed successfully!"
     log_info "=========================================="
     echo ""
     log_info "Pushed images with version tag ${VERSION_TAG}:"
-    echo "  - ${REGISTRY}/${IMAGE_PREFIX}/gateway:${VERSION_TAG}"
-    echo "  - ${REGISTRY}/${IMAGE_PREFIX}/vllm-worker:${VERSION_TAG}"
-    echo "  - ${REGISTRY}/${IMAGE_PREFIX}/web:${VERSION_TAG}"
+    for svc in gateway web vllm-qwen14b vllm-qwen7b vllm-qwen-small vllm-tinyllama vllm-llama3; do
+        echo "  - ${REGISTRY}/${IMAGE_PREFIX}/${svc}:${VERSION_TAG}"
+    done
     echo ""
-    log_info "Also pushed latest tags (for reference):"
-    echo "  - ${REGISTRY}/${IMAGE_PREFIX}/gateway:latest"
-    echo "  - ${REGISTRY}/${IMAGE_PREFIX}/vllm-worker:latest"
-    echo "  - ${REGISTRY}/${IMAGE_PREFIX}/web:latest"
+    log_info "Also pushed :latest tags for each."
     echo ""
     log_warn "Note: ArgoCD Image Updater will automatically detect the new version tag"
     log_warn "      and update deployments in Git (write-back method)."
