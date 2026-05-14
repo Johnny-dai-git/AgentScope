@@ -43,3 +43,13 @@ token.*
 # Logs
 *.log
 logs/
+
+# Test run outputs — every run produces a new timestamped directory
+test/results/*/
+!test/results/.gitkeep
+!test/results/baseline-pre-optimization/
+!test/results/baseline-post-optimization/
+
+# K8s / cloud noise
+*.kubeconfig
+.kube/
